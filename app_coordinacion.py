@@ -11,8 +11,47 @@ from reportlab.lib.units import cm
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2 import service_account
+import json
 
 st.set_page_config(page_title="Semáforo Coordinación", layout="wide")
+
+# ===== LOGIN DE COORDINADORES Y DIRECCIÓN =====
+credenciales = {
+    "ELCHE 2.0": "elche2025",
+    "ELCHE 3.0": "elche3025",
+    "ELCHE 4.0": "elche4025",
+    "VIGO 1.0": "vigo1025",
+    "VIGO 2.0": "vigo2025",
+    "VIGO 3.0": "vigo3025",
+    "LEON 1.0": "leon1025",
+    "DIRECCION": "direccion2025"
+}
+
+if "usuario" not in st.session_state:
+    st.session_state.usuario = ""
+
+if not st.session_state.usuario:
+    st.subheader("🔐 Iniciar sesión")
+    user = st.text_input("Usuario (nombre del call o DIRECCION)")
+    pwd = st.text_input("Contraseña", type="password")
+    if st.button("Entrar"):
+        if user in credenciales and credenciales[user] == pwd:
+            st.session_state.usuario = user
+            st.rerun()
+        else:
+            st.error("❌ Usuario o contraseña incorrectos")
+    st.stop()
+
+# Guardar nombre de call activo
+usuario_actual = st.session_state.usuario
+solo_direccion = usuario_actual == "DIRECCION"
+
+colores_semaforo = {
+    "AZUL - FINALIZADO": ("#0070C0", "#ffffff"),
+    "VERDE": ("#00FF00", "#000000"),
+    "AMARILLO": ("#FFFF00", "#000000"),
+    "ROJO": ("#FF0000", "#ffffff")
+}
 
 # Estilos visuales
 st.markdown("""
@@ -40,28 +79,77 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🚦 Semáforo de Clientes (Coordinación)")
+st.title(f"🚦 Semáforo de Clientes — {usuario_actual}")
+if st.button("🔄 Cambiar de usuario / call"):
+    st.session_state.usuario = ""
+    st.session_state.filtros = {}  # opcional, por si estaba definido
+    st.rerun()
+	
 
-# Configuración global
-hoy = datetime.now().date()
-festivos = {datetime(2025, 5, 17).date(), datetime(2025, 5, 19).date()}
+# Filtros (visibles para todos, pero sin permitir cambiar el CALL en coordinadores)
+if "filtros" not in st.session_state:
+    st.session_state.filtros = {"CALL": usuario_actual, "COMERCIAL": "", "CLIENTE": "", "SEMAFORO": ""}
+
+# BLOQUE DE FILTROS
+with st.expander("🔍 Filtros de búsqueda", expanded=False):
+
+    # FORM 1: aplicar filtros
+    with st.form("form_filtros_aplicar"):
+        c1, c2, c3, c4 = st.columns(4)
+        call = c1.text_input("CALL", value=st.session_state.filtros.get("CALL", usuario_actual))
+        comercial = c2.text_input("COMERCIAL", value=st.session_state.filtros.get("COMERCIAL", ""))
+        cliente = c3.text_input("CLIENTE", value=st.session_state.filtros.get("CLIENTE", ""))
+        semaforo = c4.selectbox("SEMAFORO", options=[""] + list(colores_semaforo.keys()), index=0)
+        aplicar_filtros = st.form_submit_button("✅ Aplicar filtros")
+        if aplicar_filtros:
+            st.session_state.filtros = {
+                "CALL": call,
+                "COMERCIAL": comercial,
+                "CLIENTE": cliente,
+                "SEMAFORO": semaforo
+            }
+            st.rerun()
+
+    # FORM 2: borrar filtros
+    with st.form("form_filtros_borrar"):
+        mostrar_todos = st.form_submit_button("🧹 Mostrar todos")
+        if mostrar_todos:
+            st.session_state.filtros.clear()
+            st.rerun()
+
+# Aplicar filtros
+f = st.session_state.filtros
 productos = ["F2025", "F2026", "HL", "VIGILANCIA", "IMPLANT", "DENUNCIAS"]
-archivo_guardado = "semaforo_guardado.xlsx"
+festivos = {datetime(2025, 5, 17).date(), datetime(2025, 5, 19).date()}
 colores_semaforo = {
     "AZUL - FINALIZADO": ("#0070C0", "#ffffff"),
     "VERDE": ("#00FF00", "#000000"),
     "AMARILLO": ("#FFFF00", "#000000"),
     "ROJO": ("#FF0000", "#ffffff")
 }
+# Cargar archivo si existe
+archivo_guardado = "semaforo_guardado.xlsx"
+df_cargado = pd.read_excel(archivo_guardado) if os.path.exists(archivo_guardado) else pd.DataFrame(columns=["CALL", "COMERCIAL", "CLIENTE", "DIA"] + productos + ["SEMAFORO"])
+df_cargado["DIA"] = pd.to_datetime(df_cargado["DIA"]).dt.date
 
-# Funciones auxiliares
+df_filtrado = df_cargado.copy()
+if f.get("CALL", ""):
+    df_filtrado = df_filtrado[df_filtrado["CALL"].str.contains(f["CALL"], case=False, na=False)]
+if f.get("COMERCIAL", ""):
+    df_filtrado = df_filtrado[df_filtrado["COMERCIAL"].str.contains(f["COMERCIAL"], case=False, na=False)]
+if f.get("CLIENTE", ""):
+    df_filtrado = df_filtrado[df_filtrado["CLIENTE"].str.contains(f["CLIENTE"], case=False, na=False)]
+if f.get("SEMAFORO", ""):
+    df_filtrado = df_filtrado[df_filtrado["SEMAFORO"] == f["SEMAFORO"]]
+
+
 def calcular_dia_habil(fecha, festivos):
     while fecha.weekday() >= 5 or fecha in festivos:
         fecha += timedelta(days=1)
     return fecha
 
 def insertar_cliente(call, comercial, cliente):
-    fecha = calcular_dia_habil(hoy, festivos)
+    fecha = calcular_dia_habil(datetime.now().date(), festivos)
     filas = []
     for _ in range(3):
         filas.append({
@@ -77,11 +165,12 @@ def insertar_cliente(call, comercial, cliente):
 
 def actualizar_semaforo(df):
     df = df.copy()
+    hoy = datetime.now().date()
     for cliente in df["CLIENTE"].unique():
         bloque = df[df["CLIENTE"] == cliente]
         checks = bloque[productos].applymap(lambda x: x == "✔").sum(axis=1)
         cruces = bloque[productos].applymap(lambda x: x == "❌").sum(axis=1)
-        if any(checks == 6):
+        if any(checks == len(productos)):
             for idx in bloque.index:
                 if df.at[idx, "DIA"] <= hoy:
                     df.at[idx, "SEMAFORO"] = "AZUL - FINALIZADO"
@@ -98,113 +187,10 @@ def actualizar_semaforo(df):
     df["SEMAFORO"] = df["SEMAFORO"].fillna("")
     return df
 
-def toggle(valor):
-    return "✔" if valor == "❌" else "❌"
-
-def exportar_pdf(df, ruta_pdf, filtro_call="", filtro_comercial=""):
-    c = canvas.Canvas(ruta_pdf, pagesize=A4)
-    width, height = A4
-    x_offset = 1.5 * cm
-    y_offset = height - 2 * cm
-    row_height = 0.8 * cm
-    fecha_actual = datetime.now().strftime("%d/%m/%Y %H:%M")
-    titulo = "Informe de Clientes - Semáforo"
-    if filtro_call:
-        titulo += f" | CALL: {filtro_call}"
-    if filtro_comercial:
-        titulo += f" | COMERCIAL: {filtro_comercial}"
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(x_offset, y_offset, titulo)
-    c.setFont("Helvetica", 10)
-    c.drawString(x_offset, y_offset - 0.7 * cm, f"Generado el {fecha_actual}")
-    y_offset -= 2 * cm
-
-    colores_orden = ["AZUL - FINALIZADO", "VERDE", "AMARILLO", "ROJO"]
-
-    columnas = ["CALL", "COMERCIAL", "CLIENTE", "DIA"]
-    ancho_col = 4.5 * cm
-
-    for color in colores_orden:
-        grupo = df[df['SEMAFORO'] == color]
-        if not grupo.empty:
-            if y_offset < 3 * cm:
-                c.showPage()
-                y_offset = height - 2 * cm
-
-            c.setFont("Helvetica-Bold", 10)
-            c.setFillColor(colors.HexColor(colores_semaforo[color][0]))
-            c.drawString(x_offset, y_offset, color)
-            y_offset -= row_height
-
-            c.setFont("Helvetica-Bold", 9)
-            c.setFillColor(colors.black)
-            for i, col in enumerate(columnas):
-                c.drawString(x_offset + i * ancho_col, y_offset, col)
-
-            y_offset -= row_height
-            c.setFont("Helvetica", 9)
-
-            for _, row in grupo.iterrows():
-                if y_offset < 2 * cm:
-                    c.showPage()
-                    y_offset = height - 2 * cm
-
-                for i, col in enumerate(columnas):
-                    texto = str(row[col]) if col != "DIA" else row[col].strftime("%d/%m/%Y")
-                    c.drawString(x_offset + i * ancho_col, y_offset, texto)
-                y_offset -= row_height
-
-            y_offset -= 0.5 * cm
-
-    resumen = df["SEMAFORO"].value_counts()
-    y_offset -= cm
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(x_offset, y_offset, "Resumen de clientes por estado:")
-    y_offset -= row_height
-    c.setFont("Helvetica", 9)
-
-    for estado in colores_orden:
-        cantidad = resumen.get(estado, 0)
-        if cantidad:
-            c.drawString(x_offset, y_offset, f"{estado}: {cantidad} clientes")
-            y_offset -= row_height
-
-    c.save()
-
-def subir_a_drive(nombre_archivo_local, nombre_final_en_drive, folder_id):
-    try:
-        SCOPES = ['https://www.googleapis.com/auth/drive.file']
-        creds = service_account.Credentials.from_service_account_file(
-            'service_account.json', scopes=SCOPES
-        )
-        service = build('drive', 'v3', credentials=creds)
-
-        file_metadata = {
-            'name': nombre_final_en_drive,
-            'parents': [folder_id]
-        }
-        media = MediaFileUpload(
-            nombre_archivo_local,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
-        archivo = service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id'
-        ).execute()
-
-        st.success(f"✅ Archivo subido a Drive: {nombre_final_en_drive}")
-        return archivo.get('id')
-
-    except Exception as e:
-        st.error(f"❌ Error al subir a Drive: {e}")
-
 def limpiar_clientes_expirados(df, festivos):
     hoy = datetime.now().date()
     df_filtrado = df.copy()
     clientes_eliminar = []
-    filas_exportar_closers = []
-    filas_exportar_finalizadas = []
 
     for cliente in df_filtrado["CLIENTE"].unique():
         bloque = df_filtrado[df_filtrado["CLIENTE"] == cliente].sort_values("DIA")
@@ -217,90 +203,47 @@ def limpiar_clientes_expirados(df, festivos):
             fecha_limite = calcular_dia_habil(fecha_limite + timedelta(days=1), festivos)
 
         if hoy >= fecha_limite:
-            ultima_fila = bloque.iloc[2]
-            estado = ultima_fila["SEMAFORO"]
-            if estado == "ROJO":
-                filas_exportar_closers.append(ultima_fila)
-                clientes_eliminar.append(cliente)
-            elif estado == "AZUL - FINALIZADO":
-                filas_exportar_finalizadas.append(ultima_fila)
-                clientes_eliminar.append(cliente)
+            clientes_eliminar.append(cliente)
 
-    # Exportar archivos
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    if filas_exportar_closers:
-        df_closers = pd.DataFrame(filas_exportar_closers)
-        archivo_local = "temp_rojo.xlsx"
-        df_closers.to_excel(archivo_local, index=False)
-        subir_a_drive(archivo_local, f"CLIENTES_ROJOS_{timestamp}.xlsx", "1MMvklfuHM1uWXn2aQslstCpT-W1fHc3L")
-
-    if filas_exportar_finalizadas:
-        df_finalizados = pd.DataFrame(filas_exportar_finalizadas)
-        archivo_local = "temp_azul.xlsx"
-        df_finalizados.to_excel(archivo_local, index=False)
-        subir_a_drive(archivo_local, f"VENTAS_FINALIZADAS_{timestamp}.xlsx", "1O2IFO5NeOcCxnvFSJ6GBh1QwijPOkmHE")
-
-
-
-
-
-
-    # Eliminar clientes del DataFrame original
     df = df[~df["CLIENTE"].isin(clientes_eliminar)].copy()
     return df
 
 
 
 # Cargar archivo si existe
+archivo_guardado = "semaforo_guardado.xlsx"
 df_cargado = pd.read_excel(archivo_guardado) if os.path.exists(archivo_guardado) else pd.DataFrame(columns=["CALL", "COMERCIAL", "CLIENTE", "DIA"] + productos + ["SEMAFORO"])
 df_cargado["DIA"] = pd.to_datetime(df_cargado["DIA"]).dt.date
 
-# Actualizar colores
 df_cargado = actualizar_semaforo(df_cargado)
 df_cargado = limpiar_clientes_expirados(df_cargado, festivos)
 
-
-# Filtros
-if "filtros" not in st.session_state:
-    st.session_state.filtros = {"CALL": "", "COMERCIAL": "", "CLIENTE": "", "SEMAFORO": ""}
-
-with st.expander("🔍 Filtros de búsqueda", expanded=False):
-    with st.form("form_filtros"):
-        c1, c2, c3, c4 = st.columns(4)
-        call = c1.text_input("CALL", value=st.session_state.filtros["CALL"], key="f1")
-        comercial = c2.text_input("COMERCIAL", value=st.session_state.filtros["COMERCIAL"], key="f2")
-        cliente = c3.text_input("CLIENTE", value=st.session_state.filtros["CLIENTE"], key="f3")
-        semaforo = c4.selectbox("SEMAFORO", options=[""] + list(colores_semaforo.keys()), index=0, key="f4")
-        aplicar, borrar = st.columns([5, 1])
-        if aplicar.form_submit_button("Aplicar filtros"):
-            st.session_state.filtros = {"CALL": call, "COMERCIAL": comercial, "CLIENTE": cliente, "SEMAFORO": semaforo}
-            st.rerun()
-        if borrar.form_submit_button("🧹 Mostrar todos"):
-            st.session_state.filtros = {"CALL": "", "COMERCIAL": "", "CLIENTE": "", "SEMAFORO": ""}
-            st.rerun()
-
-# Aplicar filtros
 df_filtrado = df_cargado.copy()
-f = st.session_state.filtros
-if f["CALL"]:
+if f.get("CALL", ""):
     df_filtrado = df_filtrado[df_filtrado["CALL"].str.contains(f["CALL"], case=False, na=False)]
-if f["COMERCIAL"]:
+if f.get("COMERCIAL", ""):
     df_filtrado = df_filtrado[df_filtrado["COMERCIAL"].str.contains(f["COMERCIAL"], case=False, na=False)]
-if f["CLIENTE"]:
+if f.get("CLIENTE", ""):
     df_filtrado = df_filtrado[df_filtrado["CLIENTE"].str.contains(f["CLIENTE"], case=False, na=False)]
-if f["SEMAFORO"]:
+if f.get("SEMAFORO", ""):
     df_filtrado = df_filtrado[df_filtrado["SEMAFORO"] == f["SEMAFORO"]]
 
 # Mostrar número de clientes
 st.markdown(f"**👥 Clientes mostrados:** {df_filtrado['CLIENTE'].nunique()} / {df_cargado['CLIENTE'].nunique()}")
 
-# Formulario insertar
+# Formulario insertar nuevo cliente
 with st.form("formulario_cliente", clear_on_submit=True):
     c1, c2, c3 = st.columns(3)
-    call = c1.text_input("CALL")
+
+    if solo_direccion:
+        call = c1.text_input("CALL")
+    else:
+        c1.markdown(f"**CALL:** {usuario_actual}")
+        call = usuario_actual
+
     comercial = c2.text_input("COMERCIAL")
     cliente = c3.text_input("CLIENTE")
+
     insertar = st.form_submit_button("➕ Insertar Cliente")
     if insertar and call and comercial and cliente:
         df_nuevo = insertar_cliente(call, comercial, cliente)
@@ -312,7 +255,12 @@ with st.form("formulario_cliente", clear_on_submit=True):
 
 # Mostrar tabla
 df_filtrado = actualizar_semaforo(df_filtrado)
+hoy = datetime.now().date()
+
 clientes_advertidos = set()
+def toggle(valor):
+    return "✔" if valor == "❌" else "❌"
+
 for cliente in df_filtrado["CLIENTE"].unique():
     bloque = df_filtrado[df_filtrado["CLIENTE"] == cliente]
     st.markdown("<div class='bloque-cliente-wrap'><div class='bloque-cliente-inner'>", unsafe_allow_html=True)
