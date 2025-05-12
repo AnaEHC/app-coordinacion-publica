@@ -217,6 +217,7 @@ df_cargado["DIA"] = pd.to_datetime(df_cargado["DIA"]).dt.date
 
 df_cargado = actualizar_semaforo(df_cargado)
 df_cargado = limpiar_clientes_expirados(df_cargado, festivos)
+subir_semaforo_actualizado(df_cargado, usuario_actual)
 
 df_filtrado = df_cargado.copy()
 if f.get("CALL", ""):
@@ -300,3 +301,53 @@ if st.button("📄 Exportar clientes a PDF"):
     st.success(f"✅ PDF generado en 'INFORMES PDF' como {nombre_archivo}")
     with open(ruta_completa, "rb") as pdf:
         st.download_button("⬇️ Descargar PDF generado", pdf, file_name=nombre_archivo, mime="application/pdf")
+# Al final del archivo app_coordinacion.py, añade esto:
+import io
+
+ID_CARPETA_PADRE = '1Sh2Pt_ZsKNrRz6GM6NbON0ICapYovCyS'  # carpeta CALL DAVID ESPAÑA en Drive
+
+def subir_semaforo_actualizado(df, nombre_call):
+    nombre_archivo = f"SEMAFORO {nombre_call}.xlsx"
+
+    # Crear buffer Excel
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="SEMAFORO", index=False)
+    excel_buffer.seek(0)
+
+    # Buscar carpeta COMPARTIDO {call}
+    nombre_carpeta = f"COMPARTIDO {nombre_call}"
+    query = (
+        f"mimeType='application/vnd.google-apps.folder' and name='{nombre_carpeta}' and "
+        f"'{ID_CARPETA_PADRE}' in parents"
+    )
+    resultados = service.files().list(q=query, fields="files(id)").execute()
+    archivos = resultados.get("files", [])
+
+    if not archivos:
+        print(f"⚠️ No se encontró carpeta COMPARTIDO {nombre_call} en Drive.")
+        return
+
+    carpeta_id = archivos[0]["id"]
+
+    # Buscar si ya existe el archivo
+    query_archivo = (
+        f"name='{nombre_archivo}' and '{carpeta_id}' in parents"
+    )
+    resultado_archivo = service.files().list(q=query_archivo, fields="files(id)").execute()
+    archivos_encontrados = resultado_archivo.get("files", [])
+
+    media = MediaIoBaseUpload(excel_buffer, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", resumable=True)
+
+    if archivos_encontrados:
+        file_id = archivos_encontrados[0]["id"]
+        service.files().update(fileId=file_id, media_body=media).execute()
+    else:
+        metadata = {
+            "name": nombre_archivo,
+            "parents": [carpeta_id],
+            "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+        service.files().create(body=metadata, media_body=media).execute()
+
+
